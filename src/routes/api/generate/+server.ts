@@ -17,45 +17,13 @@ const ChangelogSchema = z.object({
 	changes: z.record(z.array(z.string()))
 });
 
-async function checkRepositoryIndexed(repository: string) {
-	const repoId = `github:main:${repository}`;
-	const response = await fetch(
-		`https://api.greptile.com/v2/repositories/${encodeURIComponent(repoId)}`,
-		{
-			headers: {
-				Authorization: `Bearer ${GREPTILE_API_KEY}`
-			}
-		}
-	);
-
-	if (response.status === 404) {
-		return false; // Repository not indexed
+function extractJsonFromString(str: string): string {
+	const jsonRegex = /{(?:[^{}]|{(?:[^{}]|{[^{}]*})*})*}/g;
+	const matches = str.match(jsonRegex);
+	if (matches && matches.length > 0) {
+		return matches[0];
 	}
-
-	if (!response.ok) {
-		throw new Error(`Failed to check repository index status: ${response.statusText}`);
-	}
-
-	const data = await response.json();
-	return data.status === "COMPLETED";
-}
-
-async function indexRepository(repository: string) {
-	const response = await fetch("https://api.greptile.com/v2/repositories", {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${GREPTILE_API_KEY}`,
-			"X-GitHub-Token": env.GITHUB_TOKEN!,
-			"Content-Type": "application/json"
-		},
-		body: JSON.stringify({ repository, reload: true, remote: "github", branch: "main" })
-	});
-
-	if (!response.ok) {
-		throw new Error(`Failed to index repository: ${response.statusText}`);
-	}
-
-	return await response.json();
+	throw new Error("No valid JSON object found in the response");
 }
 
 async function queryGreptile(repository: string, diffSummary: string) {
@@ -79,7 +47,7 @@ async function queryGreptile(repository: string, diffSummary: string) {
 6. Documentation: Changes to documentation or comments
 7. Internal: Significant internal changes that don't fit into other categories
 
-If a category has no changes, omit it from the response. Return the response as a JSON object with the following structure:
+If a category has no changes, omit it from the response. Return ONLY a JSON object with the following structure, without any additional text or explanation
 {
     "title": "Brief summary of the overall changes",
     "version": "Custom version or commit range",
@@ -95,16 +63,15 @@ If a category has no changes, omit it from the response. Return the response as 
     }
 }
 
-Please return valid JSON only. Skip the preamble.
-
 Here is the diff summary as context:
 ${diffSummary}`,
 					role: "user"
-				},
-				{
-					role: "assistant",
-					content: "Here is the JSON requested:\n{"
 				}
+				//WARN: This doesn't work to get consistent JSON
+				// {
+				// 	role: "assistant",
+				// 	content: "Here are the changelogs:\n{"
+				// }
 			],
 			repositories: [{ repository, branch: "main", remote: "github" }],
 			stream: false,
@@ -117,8 +84,8 @@ ${diffSummary}`,
 	}
 
 	const greptileResponse = await response.json();
-	console.log(greptileResponse);
-	return ChangelogSchema.parse(JSON.parse("{" + greptileResponse.message));
+	const jsonString = extractJsonFromString(greptileResponse.message);
+	return ChangelogSchema.parse(JSON.parse(jsonString));
 }
 
 async function getRepoReleases(owner: string, repo: string, perPage: number = 3) {
@@ -147,17 +114,6 @@ export const POST: RequestHandler = async ({ request }) => {
 	const [owner, repo] = repository.split("/");
 
 	try {
-		// Check if the repository is already indexed
-		const isIndexed = await checkRepositoryIndexed(repository);
-
-		if (!isIndexed) {
-			await indexRepository(repository);
-			return json(
-				{ message: "Repository indexing has started. Please try again in a few minutes." },
-				{ status: 202 }
-			);
-		}
-
 		let changes = [];
 
 		if (baseSHA && headSHA) {
@@ -276,6 +232,7 @@ export const POST: RequestHandler = async ({ request }) => {
 					.join("\n\n---\n\n");
 
 				// Query Greptile API
+
 				const changelogContent = await queryGreptile(repository, diffSummary);
 
 				// Add version information

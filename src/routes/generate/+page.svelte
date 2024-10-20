@@ -15,11 +15,13 @@
 
 	let repository = "";
 	let loading = false;
+	let loadReleases = false;
 	let error = "";
 	let changelogs: any[] = [];
 	let hasReleases = true;
 	let baseSHA = "";
 	let headSHA = "";
+	let indexingStatus = "";
 
 	onMount(async () => {
 		const urlParams = new URLSearchParams(window.location.search);
@@ -29,7 +31,7 @@
 	async function checkReleases() {
 		if (!repository) return;
 
-		loading = true;
+		loadReleases = true;
 		try {
 			const response = await fetch(`/api/releases?repository=${repository}`);
 			if (!response.ok) throw new Error("Failed to check releases");
@@ -38,15 +40,48 @@
 		} catch (e) {
 			error = e.message;
 		} finally {
-			loading = false;
+			loadReleases = false;
+		}
+	}
+
+	async function checkIndexingStatus() {
+		const response = await fetch(`/api/index?repository=${repository}`);
+		const data = await response.json();
+		return data;
+	}
+
+	async function index() {
+		const response = await fetch(`/api/index?repository=${repository}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ repository })
+		});
+		const data = await response.json();
+		return data;
+	}
+
+	async function pollIndexingStatus() {
+		while (true) {
+			const status = await checkIndexingStatus();
+			if (status.indexed) {
+				return true;
+			}
+			indexingStatus = status.status;
+			await new Promise((resolve) => setTimeout(resolve, 5000)); // Wait for 5 seconds before polling again
 		}
 	}
 
 	async function generateChangelog() {
 		loading = true;
 		error = "";
+		indexingStatus = "";
+		const body = hasReleases ? { repository } : { repository, baseSHA, headSHA };
 		try {
-			const body = hasReleases ? { repository } : { repository, baseSHA, headSHA };
+			const indexStatus = await checkIndexingStatus();
+			if (!indexStatus.indexed) {
+				await index();
+				await pollIndexingStatus();
+			}
 
 			const response = await fetch("/api/generate", {
 				method: "POST",
@@ -60,6 +95,7 @@
 			error = e.message;
 		} finally {
 			loading = false;
+			indexingStatus = "";
 		}
 	}
 
@@ -131,10 +167,36 @@
 						</div>
 					{/if}
 
-					<Button type="submit" disabled={loading} class="w-full bg-blue-500 hover:bg-blue-600">
+					<Button
+						type="submit"
+						disabled={loading || loadReleases}
+						class="w-full bg-blue-500 hover:bg-blue-600"
+					>
 						{loading ? "Generating..." : "Generate Changelog"}
 					</Button>
 				</form>
+				{#if loading}
+					<div class="mt-4 flex items-center justify-center text-white">
+						<svg
+							xmlns="http://www.w3.org/2000/svg"
+							width="24"
+							height="24"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							class="lucide lucide-loader-circle mr-2 animate-spin"
+							><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg
+						>
+						{#if indexingStatus}
+							<p>Indexing repository: {indexingStatus}</p>
+						{:else}
+							<p>Generating changelog...</p>
+						{/if}
+					</div>
+				{/if}
 			</CardContent>
 		</Card>
 
